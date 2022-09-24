@@ -1,8 +1,11 @@
+use extensions::LineSplitter;
+use inquire::Editor;
 use log::{debug, info, LevelFilter};
 use notify::{self, EventKind, RecursiveMode, Watcher};
 use rand::seq::SliceRandom;
 use rand::{self, thread_rng};
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
 use std::{
@@ -13,15 +16,25 @@ use std::{
     time::Duration,
 };
 use wallpaper;
+mod extensions;
 
 const INTERVAL_SECS: u8 = 10;
+#[cfg(windows)]
 const BG_ROOT: &str = "S:/Backgrounds";
+
+#[cfg(windows)]
+const EDITOR_CMD: &str = r"C:\WINDOWS\gvim.bat";
+#[cfg(not(windows))]
+const EDITOR_CMD: &str = "vim";
 
 enum InputAction {
     PrintCurrent,
+    EditCurrent,
     SetRoot,
     ChooseFolders(String),
     ReloadWallpapers,
+    AppendSelection(String),
+    Nop
 }
 
 fn main() -> io::Result<()> {
@@ -32,7 +45,8 @@ fn main() -> io::Result<()> {
     let files = Arc::new(Mutex::new(load_wallpapers()?));
     let thread_files = files.clone();
     let watcher_files = files.clone();
-    let chosen_folders = Arc::new(Mutex::new(vec![BG_ROOT.to_string()]));
+    // let chosen_folders = Arc::new(Mutex::new(HashSet::from([BG_ROOT.to_string()])));
+    let chosen_folders = Arc::new(Mutex::new(Vec::from([BG_ROOT.to_string()])));
     let t_chosen_folders = chosen_folders.clone();
 
     let mut watcher =
@@ -85,26 +99,66 @@ fn main() -> io::Result<()> {
         thread::sleep(Duration::from_secs(INTERVAL_SECS.into()));
     });
 
-    let update_chosen_folders = |folders| {
-        info!("New selection: {:?}", folders);
-        let mut guard = chosen_folders.lock().unwrap();
-        *guard = folders;
+    let update_chosen_folders = |folders: Vec<String>, append: bool| {
+        let folders = if folders.len() == 0 || (folders.len() == 1 && folders[0] == "") {
+            vec![BG_ROOT.to_string()]
+        } else {
+            folders
+        };
+
+        let mut selected = chosen_folders.lock().unwrap();
+        let new_selection = if append {
+            let mut combined = [selected.clone(), folders].concat();
+            combined.sort_unstable();
+            combined.dedup();
+            combined
+        } else {
+            folders
+        };
+
+        info!("New selection: {:?}", new_selection);
+        *selected = new_selection;
+    };
+
+    let edit_selected = || {
+        let chosen = {
+            let folders = chosen_folders.lock().unwrap();
+            Editor::new("")
+                .with_editor_command(OsStr::new(EDITOR_CMD))
+                .with_predefined_text(&folders.join("\n"))
+                .prompt_skippable()
+                .unwrap()
+                .unwrap_or("".to_string())
+                .as_str()
+                .trim()
+                .split_lines()
+        };
+
+        update_chosen_folders(chosen, false);
     };
 
     loop {
         match handle_input() {
             InputAction::PrintCurrent => {
-                println!("{}", wallpaper::get().unwrap());
+                info!("Folders: {:?}", chosen_folders.lock().unwrap());
+                info!("Wallpaper: {}", wallpaper::get().unwrap());
             }
-            InputAction::SetRoot => update_chosen_folders(vec![BG_ROOT.to_string()]),
+            InputAction::SetRoot => update_chosen_folders(vec![BG_ROOT.to_string()], false),
             InputAction::ChooseFolders(input) => {
                 let new_selection = get_folders(&input);
-                update_chosen_folders(new_selection)
+                update_chosen_folders(new_selection, false)
             }
             InputAction::ReloadWallpapers => {
                 let mut wallpapers = files.lock().unwrap();
                 *wallpapers = load_wallpapers()?;
             }
+            InputAction::EditCurrent => edit_selected(),
+            InputAction::AppendSelection(input) => {
+                let input = &input[2..].trim();
+                let new_selection = get_folders(input);
+                update_chosen_folders(new_selection, true)
+            }
+            InputAction::Nop => {}
         }
     }
 }
@@ -116,9 +170,12 @@ fn handle_input() -> InputAction {
     input = input.trim().to_string();
 
     match input.as_str() {
-        "." => InputAction::SetRoot,
+        "." | "/" => InputAction::SetRoot,
         "c" | "p" => InputAction::PrintCurrent,
         "r" => InputAction::ReloadWallpapers,
+        "e" => InputAction::EditCurrent,
+        n if n.starts_with("a ") => InputAction::AppendSelection(input),
+        "" => InputAction::Nop,
         _ => InputAction::ChooseFolders(input),
     }
 }
@@ -140,8 +197,23 @@ fn get_folders(input: &str) -> Vec<String> {
         .trim()
         .split("\n")
         .map(|s| s.replace("\\", "/"))
-        .collect();
-    output
+        .collect::<Vec<_>>();
+
+    match output.len() {
+        1 => output,
+        _ => {
+            let received = Editor::new("Select backgrounds")
+                .with_predefined_text(&output.join("\n"))
+                .with_editor_command(OsStr::new(r"C:\WINDOWS\gvim.bat"))
+                // .with_editor_command(OsStr::new(r"C:\WINDOWS\vim.bat"))
+                .prompt_skippable()
+                .unwrap()
+                .unwrap_or("".to_string())
+                .as_str()
+                .split_lines();
+            received
+        }
+    }
 }
 
 fn load_wallpapers() -> io::Result<HashSet<String>> {

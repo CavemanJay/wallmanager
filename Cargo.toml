@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 env_logger = "0.9.1"
+inquire = { version = "0.3.0", features = ["editor"] }
 log = "0.4.17"
 notify = "5.0.0"
 rand = "0.8.5"
